@@ -1,0 +1,158 @@
+<html>
+	<head>
+		<title></title>
+        	</head>
+	<body>
+		<script type="text/javascript" src="nanovm.js"></script>
+<script type="text/javascript">
+"use strict";
+var regnames = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+function vm_print_callback(s) {
+    alert(s);
+}
+
+function vm_set_port_callback(value) {
+}
+
+function vm_get_port_callback() {
+}
+
+function vm_set_register_callback(regno, value) {
+    var textbox_name = 'textbox_' + regnames.charAt(regno);
+    var textbox = document.getElementById(textbox_name);
+    if (textbox != null) {
+        textbox.value = value;
+    }
+    else {
+        alert('Textbox not found: ' + textbox_name);
+    }
+}
+
+function get_program() {
+    var textarea_Program = document.getElementById("textarea_Program");
+
+    if (textarea_Program.value.length == 0) {
+        textarea_Program.value = "33I22J5Kij+k-I";
+    }
+    return textarea_Program.value;
+}
+
+function show_stack() {
+    var textarea_stack = document.getElementById("textarea_Stack");
+    var stack = nanovm_get_stack();
+    var i;
+    var text = "";
+    for (i = 0; i < stack.length; ++i) {
+        text += stack[i] + "\r\n";
+    }
+    textarea_stack.value = text;
+}
+
+function show_registers() {
+    var textarea_stack = document.getElementById("textarea_Stack");
+    var registers = nanovm_get_registers();
+    for (var regno = 0; regno < regnames.length; ++regno) {
+        var textbox_name = 'textbox_' + regnames.charAt(regno);
+        var textbox = document.getElementById(textbox_name);
+        if (textbox != null) {
+            textbox.value = regno>=registers.length ? 0 : registers[regno];
+        }
+    }
+}
+
+function start() {
+    var textbox_IP = document.getElementById("textbox_IP");
+
+    nanovm_load_code(get_program());
+
+    while (nanovm_step() > 0) {
+        textbox_IP.value = nanovm_get_ip();
+        // pass the time!
+    }
+    show_stack();
+}
+
+function step() {
+    var textbox_IP = document.getElementById("textbox_IP");
+    var textbox_Instruction = document.getElementById("textbox_Instruction");
+    var ip = nanovm_get_ip();
+    if (ip == "EOF") {
+        nanovm_load_code(get_program());
+        textbox_IP.value = nanovm_get_ip();
+        show_registers();
+        show_stack();
+    }
+    else {
+        nanovm_step();
+        textbox_IP.value = nanovm_get_ip();
+        show_stack();
+    }
+    textbox_Instruction.value = nanovm_get_instruction();
+}
+
+// Finally, initialize our system!
+nanovm_init(vm_print_callback, vm_set_port_callback, vm_get_port_callback, vm_set_register_callback);
+</script>
+		<form action="vm.html">
+			Enter your code here:<br/>
+			<textarea id="textarea_Program" rows="4" cols="80"></textarea><br/>
+            <table>
+                <tr>
+                    <td>
+			            <table>
+                            <tr><td colspan="2">Variables:</td></tr>
+				            <tr>
+					            <td>Instruction pointer:</td>
+					            <td><input id="textbox_IP" value="0"/></td>
+				            </tr>
+				            <tr>
+					            <td>Instruction:</td>
+					            <td><input id="textbox_Instruction" value="0"/></td>
+				            </tr>
+				            <tr>
+					            <td>Digital port:</td>
+					            <td><input id="textbox_port" value="0"/></td>
+				            </tr>
+				            <tr>
+					            <td>Register I:</td>
+					            <td><input id="textbox_I" value="0"/></td>
+				            </tr>
+				            <tr>
+					            <td>Register J:</td>
+					            <td><input id="textbox_J" value="0"/></td>
+				            </tr>
+				            <tr>
+					            <td>Register K:</td>
+					            <td><input id="textbox_K" value="0"/></td>
+				            </tr>
+				            <tr>
+					            <td>Register A:</td>
+					            <td><input id="textbox_A" value="0"/></td>
+				            </tr>
+				            <tr>
+					            <td>Register B:</td>
+					            <td><input id="textbox_B" value="0"/></td>
+				            </tr>
+				            <tr>
+					            <td>Register C:</td>
+					            <td><input id="textbox_C" value="0"/></td>
+				            </tr>
+			            </table><br/>
+                    </td>
+                    <td>
+                        Stack:<br />
+			            <textarea id="textarea_Stack" rows="15" cols="12"></textarea><br/>
+                    </td>
+                    <td>
+                        Log:<br />
+			            <textarea id="textarea_Log" rows="15" cols="45"></textarea><br/>
+                    </td>
+                </tr>
+            </table>
+			<input type="button" value="Step!" onclick="step()"/>
+			<input type="button" value="Start" onclick="start()"/>
+			<input type="button" value="Stop"/>
+		</form>
+	</body>
+</html>
+

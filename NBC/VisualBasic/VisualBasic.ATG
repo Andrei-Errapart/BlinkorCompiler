@@ -1,0 +1,733 @@
+Imports NBC.IR
+
+COMPILER VisualBasicCompiler
+
+' Output
+Public Result as List(Of Statement)
+
+' Helper function
+Public Shared Function ConcatExpression(ByVal expr as Expression, ByVal op as ExpressionType, ByVal expr2 as Expression) as Expression
+	Dim r = new Expression With { .Type = op, .Args = new List(Of Expression) }
+	r.Args.Add(expr)
+	r.Args.Add(expr2)
+	Return r
+End Function
+
+Public Shared Function ConcatUnaryExpression(ByVal op as ExpressionType, ByVal expr2 as Expression) as Expression
+	Dim r = new Expression With { .Type = op, .Args = new List(Of Expression) }
+	r.Args.Add(expr2)
+	Return r
+End Function
+
+Public Function IsTemplateParams() As Boolean
+	Return (la.val="(") And StrComp(scanner.Peek().val, "of", vbTextCompare)=0
+End Function
+
+IGNORECASE
+CHARACTERS
+  letter = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" .
+  digit  = "0123456789" .
+  hexdigit = digit + "abcdef" + "ABCDEF" .
+  octdigit = "0123456" .
+  alphanumeric	= letter + digit .
+//  printable = "!\"#$%&/'
+  id_name_chars	= alphanumeric + '_' .
+  id_trail		= alphanumeric + '_' .
+  cr     = '\r' .
+  lf     = '\n' .
+  tab    = '\t' .
+  anyButQuote = ANY - '"' .
+
+TOKENS
+  // id and qualifiedid cannot be distinguished. Thus, if one really needs non-qualified id, it has to be detected at the grammar level.
+  ident = ((letter|'_') { id_trail } | '[' { id_name_chars } ']') .
+
+  // negative digits can cause trouble, and, after all, it is relatively easy to optimize away.	  
+  intliteral = digit {digit} .
+
+  newline1 = ( cr lf | lf | ':' )  .
+
+  // Have to take into account the double apostrofes.
+  string = '"' ('"' '"' | {anyButQuote}) '"'.
+
+COMMENTS FROM "'" TO cr
+
+IGNORE tab
+
+PRODUCTIONS
+
+/*----------------------------------------------------------------------------*/
+VisualBasicCompiler			(. Dim st as Statement = Nothing
+								Dim am as AccessModifier = AccessModifier.NONE
+								Result = new List(Of Statement) .)
+ =
+  NonEmptyBlockOfStmt<st>			(. Result.Add(VBUtils.CreateMainModule(st)) .)
+ | (
+	{ OptionStmt<st>		(. Result.Add(st) .)
+	}
+	{ ImportsStmt<st>		(. Result.Add(st) .)
+	}
+    [ AccessModifierDeclaration<am>
+    ] NamespaceMemberDeclaration<st, am>	(. Result.Add(st)
+												am = AccessModifier.NONE .)
+	{   [ AccessModifierDeclaration<am>
+		] NamespaceMemberDeclaration<st, am>	(. Result.Add(st)
+												am = AccessModifier.NONE .)
+	}
+ )
+ .
+
+/*----------------------------------------------------------------------------*/
+BlockOfStmt<ByRef st as Statement>		(. st = new Statement With { .Type = SType.MULTIPLE_STATEMENTS, .Statements = new List(Of Statement) }
+										Dim st2 as Statement = Nothing .)
+= {
+      NonDeclaringStmt<st2>					(. st.Statements.Add(st2) .)
+	}
+	.
+
+/*----------------------------------------------------------------------------*/
+NonEmptyBlockOfStmt<ByRef st as Statement>		(. st = new Statement With { .Type = SType.MULTIPLE_STATEMENTS, .Statements = new List(Of Statement) }
+										Dim st2 as Statement = Nothing .)
+=
+  NonDeclaringStmt<st2>					(. st.Statements.Add(st2) .)
+  {
+      NonDeclaringStmt<st2>				(. st.Statements.Add(st2) .)
+  }
+  .
+
+
+/*----------------------------------------------------------------------------*/
+NonDeclaringStmt<ByRef st as Statement>
+= 
+      PrintStmt<st>
+	| ForStmt<st>
+	| DimStatement<st>
+	| IfStmt<st>
+	| WhileStmt<st>
+	| ThrowStmt<st>
+	| TryCatchStmt<st>
+	| AssignmentOrInvokeStmt<st>
+	| ExitStmt<st>
+	| ReturnStmt<st>
+	| SelectStmt<st>
+	.
+
+
+/*----------------------------------------------------------------------------*/
+NamespaceMemberDeclaration<ByRef st As Statement, ByVal am As AccessModifier>
+=
+	(  NamespaceDeclaration<st, am>
+	 | ModuleDeclaration<st, am>
+	 | NonModuleDeclaration<st, am>
+	)
+	.
+
+/*----------------------------------------------------------------------------*/
+NonModuleDeclaration<ByRef st As Statement, am as AccessModifier>
+=  EnumDeclaration<st, am>
+ | StructureDeclaration<st, am>
+//   InterfaceDeclaration
+ | ClassDeclaration<st, am>
+//   DelegateDeclaration
+ .
+
+/*----------------------------------------------------------------------------*/
+EnumDeclaration<ByRef st as Statement, am as AccessModifier>
+								(. Dim exp as Expression = Nothing .)
+= "Enum" ident					(. st = new Statement With { .Type = SType.ENUM_, .AccessModifier = am, .Identifier = t.val, .Variables = new List(Of Variable) } .)
+	newline { newline }
+		ident						(. st.Variables.Add(new Variable With { .Name = t.val }) .)
+		[ "=" Expr<exp>				(. st.Variables.Last().Init = exp .)
+		]
+		{ newline }
+	{
+		ident						(. st.Variables.Add(new Variable With { .Name = t.val }) .)
+		[ "=" Expr<exp>				(. st.Variables.Last().Init = exp .)
+		]
+		{ newline }
+	}
+	"End" "Enum" newline
+.
+
+/*----------------------------------------------------------------------------*/
+ClassDeclaration<ByRef st_class as Statement, class_am as AccessModifier>
+									(.  Dim am as AccessModifier = AccessModifier.NONE
+										Dim st as Statement = Nothing
+										Dim v as Variable = Nothing
+										Dim vm as VariableModifier = VariableModifier.NONE
+										.)
+= "Class"
+	ident							(. st_class = new Statement With { .Type = SType.CLASS_,  .Identifier = t.val,  .AccessModifier = class_am, .Statements = new List(Of Statement), .Variables = new List(Of Variable) } .)
+	newline
+	{
+		AccessModifierDeclaration<am>
+		ClassMemberDeclaration<st_class, am>
+	}
+	"End" "Class" newline
+.
+
+/*----------------------------------------------------------------------------*/
+StructureDeclaration<ByRef st_class as Statement, class_am as AccessModifier>
+									(.  Dim am as AccessModifier = AccessModifier.NONE
+										.)
+= "Structure"
+	ident							(. st_class = new Statement With { .Type = SType.CLASS_,  .Identifier = t.val,  .AccessModifier = class_am, .Statements = new List(Of Statement), .Variables = new List(Of Variable) } .)
+	newline
+	{
+		AccessModifierDeclaration<am>
+		ClassMemberDeclaration<st_class, am>
+	}
+	"End" "Structure" newline
+.
+
+/*----------------------------------------------------------------------------*/
+ClassMemberDeclaration<ByVal st_class as Statement, ByVal am as AccessModifier>
+										(. Dim vm as VariableModifier = VariableModifier.NONE
+										   Dim st as Statement = Nothing
+										   Dim v as Variable = Nothing
+										.)
+=
+(
+  NonModuleDeclaration<st, am>			(. st_class.Statements.Add(st) .)
+| MethodMemberDeclaration<st, am>		(. st_class.Statements.Add(st) .)
+| [ "Const"								(. vm = VariableModifier.CONST_ .)
+  ]
+		VariableDeclarationOptionalInit<v> newline	(. v.Modifier = vm
+													st_class.Variables.Add(v) .)
+)
+.
+
+	/*
+	ClassMemberDeclaration ::=
+   NonModuleDeclaration |
+   EventMemberDeclaration |
+   VariableMemberDeclaration |
+   ConstantMemberDeclaration |
+   MethodMemberDeclaration |
+   PropertyMemberDeclaration |
+   ConstructorMemberDeclaration
+	*/
+
+
+/*----------------------------------------------------------------------------*/
+ModuleDeclaration<ByRef st as Statement, am as AccessModifier>
+									(. st = new Statement With { .Type = SType.MODULE_,  .AccessModifier = am, .Statements = new List(Of Statement) }
+										Dim st_sub as Statement = Nothing
+										Dim am2 as AccessModifier = AccessModifier.NONE .)
+= "Module"
+	ident							(. st.Identifier = t.val .)
+	newline
+	{ 
+		[ AccessModifierDeclaration<am2> ]
+	  ( MethodMemberDeclaration<st_sub, am2>	(. st.Statements.Add(st_sub) .)
+	  | DimStatement<st_sub>					(. st.Statements.Add(st_sub) .)
+	  )											(. am2 = AccessModifier.NONE .)
+	}
+	"End" "Module" newline .
+
+
+/*----------------------------------------------------------------------------*/
+NamespaceDeclaration<ByRef st as Statement, am as AccessModifier>
+									(. st = new Statement With { .Type = SType.NAMESPACE_, .AccessModifier = am, .Statements = new List(Of Statement) }
+										Dim qid as String = Nothing
+										Dim st2 as Statement = Nothing
+										Dim am2 as AccessModifier = AccessModifier.NONE .)
+= "Namespace"
+	QualifiedIdent<qid>				(. st.Identifier = qid .)
+	newline
+	{
+	  AccessModifierDeclaration<am2>
+	  (
+	    NonModuleDeclaration<st2, am2>			(. st.Statements.Add(st2) .)
+	  | ModuleDeclaration<st2, am2>				(. st.Statements.Add(st2) .)
+	  )											(. am2 = AccessModifier.NONE .)
+	}
+	"End" "Namespace" newline
+.
+
+
+/*----------------------------------------------------------------------------*/
+DimStatement<ByRef st As Statement>	(. st = new Statement With { .Type = SType.VARIABLE_DECLARATION, .Variables = new List(Of Variable)  }
+										Dim v as Variable = Nothing
+										Dim vm as VariableModifier = VariableModifier.NONE
+										.)
+= (  "Dim"
+   | "Const"								(. vm = VariableModifier.CONST_ .)
+   )
+   VariableDeclarationOptionalInit<v>		(. v.Modifier = vm
+											   st.Variables.Add(v) .)
+	{ ","
+		VariableDeclarationOptionalInit<v>	(. v.Modifier = vm
+											   st.Variables.Add(v) .)
+	}
+	newline
+.
+
+/*----------------------------------------------------------------------------*/
+OptionStmt<ByRef st As Statement>		(. st = new Statement With { .Type = SType.OPTION_, .ActualParameters = new List(Of Expression) }
+										Dim exp as Expression = Nothing .)
+= "Option" Ident<exp>					(. st.ActualParameters.Add(exp) .)
+  Ident<exp>							(. st.ActualParameters.Add(exp) .)
+  newline
+.
+
+/*----------------------------------------------------------------------------*/
+TypenameExpr<ByRef tn as VBTypename>	(. tn = new VBTypename With { .Ranks = new List(Of List(Of Integer)) } .)
+= ident									(. tn.Name = t.val .)
+{
+	"("									(. tn.Ranks.Add(new List(Of Integer)) .)
+	[ intliteral						(. tn.Ranks.Last().Add(Convert.ToInt32(t.val)) .)
+	{ "," intliteral					(. tn.Ranks.Last().Add(Convert.ToInt32(t.val)) .)
+	} ]
+	")"									(. If tn.Ranks.Last().Count = 0 Then
+												tn.Ranks.Last().Add(-1)
+											End If
+										.)
+} .
+
+/*----------------------------------------------------------------------------*/
+// For use in Dim, For, For Each, etc.
+VariableDeclaration<ByRef v as Variable>	(. Dim tn as VBTypename = Nothing
+											   Dim te as VariableType = Nothing .)
+= TypenameExpr<tn>							(. v = Variable.CreateFromTypename(tn) .)
+    [ "As" TypeExpression<te>				(. v.SetMostNestedType(te) .)
+	] .
+
+/*----------------------------------------------------------------------------*/
+// "As" TypeExpression<te>
+TypeExpression<ByRef te as VariableType>	(. Dim qid as String = Nothing
+											   Dim t2 as VariableType = Nothing.)
+= QualifiedIdent<qid>						(. te = new VariableType With { .Type=VTType.NAMED, .Name=qid } .)
+  [IF(IsTemplateParams()) "(" "Of" TypeExpression<t2>				(. te.NestedType = new List(Of VariableType)
+											   te.NestedType.Add(t2) .)
+	{ ","  TypeExpression<t2>				(. te.NestedType.Add(t2) .)
+	}
+  ")" ]
+.
+
+/*----------------------------------------------------------------------------*/
+VariableDeclarationOptionalInit<ByRef v as Variable>	(. Dim exp As Expression = Nothing .)
+= VariableDeclaration<v>
+	[ "=" Expr<exp>								(. v.Init = exp .)
+	] .
+
+/*----------------------------------------------------------------------------*/
+ImportsStmt<ByRef st As Statement>		(. st = new Statement With { .Type = SType.IMPORTS_, .FormalParameters = new List(Of Variable) }
+										Dim id as String = "" .)
+= "Imports" QualifiedIdent<id>			(. st.FormalParameters.Add(new Variable With { .Name = id } ) .)
+	[ "=" QualifiedIdent<id>			(. st.FormalParameters.Last().Type = new VariableType With { .Type = VTType.NAMED, .Name = id } .)
+	]
+	{ QualifiedIdent<id>				(. st.FormalParameters.Add(new Variable With { .Name = id } ) .)
+		[ "=" QualifiedIdent<id>		(. st.FormalParameters.Last().Type = new VariableType With { .Type = VTType.NAMED, .Name = id } .)
+		]
+	}
+	newline
+	.
+
+/*----------------------------------------------------------------------------*/
+QualifiedIdent<ByRef Name As String>
+= ident									(. Name = t.val .)
+ { "." ident							(. Name = Name & "." & t.val .)
+ }
+ .
+
+/*----------------------------------------------------------------------------*/
+AssignmentOrInvokeStmt<ByRef st as Statement>	(. st = new Statement With { .Type = SType.INVOKE_EXPRESSION, .ActualParameters = new List(Of Expression) }
+												Dim exp as Expression = Nothing
+												Dim rhs as Expression = Nothing .)
+=  Expr<exp>							(. st.ActualParameters.Add(exp) .)
+	[ "^=" Expr<rhs>					(. VBUtils.RewriteCompositeAssignment(st, ExpressionType.BINARY_OP_POWER, rhs) .)
+	| "*=" Expr<rhs>					(. VBUtils.RewriteCompositeAssignment(st, ExpressionType.BINARY_OP_MULTIPLY, rhs) .)
+	| "/=" Expr<rhs>					(. VBUtils.RewriteCompositeAssignment(st, ExpressionType.BINARY_OP_DIVIDE, rhs) .)
+	| "\\=" Expr<rhs>					(. VBUtils.RewriteCompositeAssignment(st, ExpressionType.BINARY_OP_INT_DIVIDE, rhs) .)
+	| "+=" Expr<rhs>					(. VBUtils.RewriteCompositeAssignment(st, ExpressionType.BINARY_OP_PLUS, rhs) .)
+	| "-=" Expr<rhs>					(. VBUtils.RewriteCompositeAssignment(st, ExpressionType.BINARY_OP_MINUS, rhs) .)
+	| "<<=" Expr<rhs>					(. VBUtils.RewriteCompositeAssignment(st, ExpressionType.BINARY_OP_SHIFT_LEFT, rhs) .)
+	| ">>=" Expr<rhs>					(. VBUtils.RewriteCompositeAssignment(st, ExpressionType.BINARY_OP_SHIFT_RIGHT, rhs) .)
+	| "&=" Expr<rhs>					(. VBUtils.RewriteCompositeAssignment(st, ExpressionType.BINARY_OP_CONCAT, rhs) .)
+	]
+	newline								(. VBUtils.CorrectForAssignment(st) .)
+	.
+
+
+/*----------------------------------------------------------------------------*/
+PrintStmt<ByRef st as Statement>		(. st = new Statement With { .Type = SType.SUBROUTINE_CALL, .Identifier = VBUtils.NameOfPrint, .ActualParameters = new List(Of Expression) }
+										Dim exp as Expression = Nothing .)
+= "print" Expr<exp>						(. st.ActualParameters.Add(exp) .)
+	{ "," Expr<exp>						(. st.ActualParameters.Add(exp) .)
+	}
+	newline .
+
+/*----------------------------------------------------------------------------*/
+ForStmt<ByRef st as Statement>		(. st = new Statement With { .Type = SType.FOR_, .Variables = new List(Of Variable), .ActualParameters = new List(Of Expression) }
+										Dim v as Variable = Nothing
+										Dim block as Statement = Nothing
+										Dim exp as Expression = Nothing .)
+= "For"
+	( "Each"						(. st.Type = SType.FOR_EACH .)
+		VariableDeclaration<v>		(. st.Variables.Add(v) .)
+		"In" Expr<exp> 				(. st.ActualParameters.Add(exp) .)	
+	| 
+		VariableDeclaration<v>		(. st.Variables.Add(v) .)
+		'=' Expr<exp>				(. st.Variables.Last().Init = exp .)
+		"To" Expr<exp> 				(. st.ActualParameters.Add(exp) .)
+	)
+	newline
+	BlockOfStmt<block>				(. st.Statements = block.Statements .)
+	"Next" newline
+.
+
+/*----------------------------------------------------------------------------*/
+IfStmt<ByRef st as Statement>		(. st = new Statement With { .Type = SType.IF_, .ActualParameters = new List(Of Expression), .Statements = new List(Of Statement) }
+										Dim block as Statement = Nothing
+										Dim exp as Expression = Nothing .)
+= "If"
+	Expr<exp>						(. st.ActualParameters.Add(exp) .)
+	"Then" newline
+	BlockOfStmt<block>				(. st.Statements.Add(block) .)
+	{ "ElseIf" Expr<exp>			(. st.ActualParameters.Add(exp) .)
+	  "Then" newline
+	  BlockOfStmt<block>			(. st.Statements.Add(block) .)
+	}
+	[ "Else" newline 
+	  BlockOfStmt<block>			(. st.Statements.Add(block) .)
+    ]
+	"End" "If" newline
+.
+
+/*----------------------------------------------------------------------------*/
+WhileStmt<ByRef st as Statement>	(. st = new Statement With { .Type = SType.WHILE_, .ActualParameters = new List(Of Expression), .Statements = new List(Of Statement) }
+										Dim block as Statement = Nothing
+										Dim exp as Expression = Nothing .)
+= "While" Expr<exp> newline			(. st.ActualParameters.Add(exp) .)
+	BlockOfStmt<block>				(. st.Statements.Add(block) .)
+	"End" "While" newline
+.
+
+/*----------------------------------------------------------------------------*/
+/* TODO: how to ensure that Case Else is the last expression and there is only 1 of them? */
+SelectStmt<ByRef st as Statement>		(. st = new Statement With { .Type = SType.SELECT_, .ActualParameters = new List(Of Expression), .Statements = new List(Of Statement) }
+										Dim block as Statement = Nothing
+										Dim exp as Expression = Nothing .)
+= "Select" "Case" Expr<exp> newline	(. st.ActualParameters.Add(exp) .)
+	{ "Case" ( "Else" 
+		| Expr<exp>					(. st.ActualParameters.Add(exp) .)
+		) newline
+		BlockOfStmt<block>				(. st.Statements.Add(block) .)
+	}
+	"End" "Select" newline
+.
+
+/*----------------------------------------------------------------------------*/
+ExitStmt<ByRef st as Statement>	(.  .)
+= "Exit"	(. st = new Statement With { .Type = SType.EXIT_, .Identifier = "" } .)
+  [ "While"	(. st.Identifier = "While" .)
+  | "For"	(. st.Identifier = "For" .)
+  ]
+  newline
+.
+
+
+/*----------------------------------------------------------------------------*/
+ReturnStmt<ByRef st as Statement>	(. st = new Statement With { .Type = SType.RETURN_, .ActualParameters = new List(Of Expression) }
+										Dim exp as Expression = Nothing .)
+= "Return" Expr<exp> newline		(. st.ActualParameters.Add(exp) .)
+.
+
+/*----------------------------------------------------------------------------*/
+ThrowStmt<ByRef st as Statement>	(. st = new Statement With { .Type = SType.THROW_, .ActualParameters = new List(Of Expression) }
+										Dim exp as Expression = Nothing .)
+= "Throw" Expr<exp> newline			(. st.ActualParameters.Add(exp) .)
+.
+
+
+/*----------------------------------------------------------------------------*/
+TryCatchStmt<ByRef st as Statement>	(. st = new Statement With { .Type = SType.TRY_CATCH, .Variables = new List(Of Variable), .Statements = new List(Of Statement) }
+										Dim block as Statement = Nothing
+										Dim v as Variable = Nothing
+										.)
+= "Try" newline
+	BlockOfStmt<block>				(. st.Statements.Add(block) .)
+	"Catch" VariableDeclaration<v>	(. st.Variables.Add(v) .)
+	newline
+	BlockOfStmt<block>				(. st.Statements.Add(block) .)
+	{
+		"Catch" VariableDeclaration<v>	(. st.Variables.Add(v) .)
+		newline
+		BlockOfStmt<block>				(. st.Statements.Add(block) .)
+	}
+	"End" "Try" newline
+.
+
+/*----------------------------------------------------------------------------*/
+MethodMemberDeclaration<ByRef st as Statement, am_sub As AccessModifier >
+									(.  Dim block as Statement = Nothing 
+										Dim v as Variable = Nothing
+										Dim pml as List(Of ProcedureModifier) = Nothing
+										Dim te as VariableType = Nothing
+										Dim vm as VariableModifier = VariableModifier.NONE
+										.)
+= [ ProcedureModifiers<pml> ]
+									(. st = new Statement With { .Type = SType.FUNCTION_DECLARATION, .AccessModifier = am_sub, .Modifiers = pml, .FormalParameters = new List(Of Variable), .ReturnTypes = new List(Of VariableType)  } .)
+  (
+  "Sub"
+	( "New"											(. st.Identifier = "New"
+														if st.Modifiers Is Nothing Then
+															st.Modifiers = new List(Of ProcedureModifier)
+														End If
+														st.Modifiers.Add(ProcedureModifier.CONSTRUCTOR) .)
+	 | ident										(. st.Identifier = t.val .)
+	)
+	"("
+	[ VariableDeclarationOptionalModifier<v>		(. st.FormalParameters.Add(v) .)
+	{ "," VariableDeclarationOptionalModifier<v>	(. st.FormalParameters.Add(v) .)
+	} ]
+	")" newline
+	BlockOfStmt<block>				(. st.Statements = block.Statements .)
+	"End" "Sub"
+	|
+  "Function"
+	ident							(. st.Identifier = t.val .)
+	"("
+	[ VariableDeclarationOptionalModifier<v>		(. st.FormalParameters.Add(v) .)
+	{ "," VariableDeclarationOptionalModifier<v>	(. st.FormalParameters.Add(v) .)
+	} ]
+	")" "As" TypeExpression<te> newline	(. st.ReturnTypes.Add(te) .)
+	BlockOfStmt<block>				(. st.Statements = block.Statements .)
+	"End" "Function"
+	)
+	newline .
+
+/*----------------------------------------------------------------------------*/
+VariableDeclarationOptionalModifier<ByRef v as Variable>	(. Dim vm as VariableModifier = VariableModifier.NONE .)
+= [  "ByVal"					(. vm = VariableModifier.BYVAL_ .)
+   | "ByRef"					(. vm = VariableModifier.BYREF_ .)
+  ] VariableDeclaration<v>		(. v.Modifier = vm .)
+.
+
+
+/*----------------------------------------------------------------------------*/
+AccessModifierDeclaration<ByRef am As AccessModifier>
+=   "Public"						(. am = AccessModifier.PUBLIC_ .)
+  | "Protected"						(. am = AccessModifier.PROTECTED_ .)
+  | "Friend"						(. am = AccessModifier.FRIEND_ .)
+  | "Private"						(. am = AccessModifier.PRIVATE_ .)
+  .
+
+/*----------------------------------------------------------------------------*/
+ProcedureModifiers<ByRef pml as List(Of ProcedureModifier)>
+=									(. pml = new List(Of ProcedureModifier)
+										Dim pm as ProcedureModifier .)
+    ProcedureModifierDeclaration<pm>	(. pml.Add(pm) .)
+  {	ProcedureModifierDeclaration<pm>	(. pml.Add(pm) .)
+  } .
+
+  /*
+PropertyModifierDeclaration<ByRef pm as ProcedureModifier>
+=  ProcedureModifierDeclaration<pm>
+  | "Default"						(. pm = ProcedureModifier.DEFAULT_ .)
+  | "ReadOnly"						(. pm = ProcedureModifier.READONLY_ .)
+  | "WriteOnly"						(. pm = ProcedureModifier.WRITEONLY_ .)
+  .
+  */
+
+ProcedureModifierDeclaration<ByRef pm as ProcedureModifier>
+=  "Shadows"						(. pm = ProcedureModifier.SHADOWS_ .)
+  | "Shared"						(. pm = ProcedureModifier.SHARED_ .)
+  | "Overridable"					(. pm = ProcedureModifier.OVERRIDABLE_ .)
+  | "NotOverridable"				(. pm = ProcedureModifier.NOTOVERRIDABLE_ .)
+  | "MustOverride"					(. pm = ProcedureModifier.MUSTOVERRIDE_ .)
+  | "Overrides"						(. pm = ProcedureModifier.OVERRIDES_ .)
+  | "Overloads"						(. pm = ProcedureModifier.OVERLOADS_ .)
+  .
+  
+/*----------------------------------------------------------------------------*/
+Ident<ByRef id as Expression>
+= ident                             (. id = new Expression with { .Type = ExpressionType.VARIABLE_ACCESS,  .StringValue = t.val } .)
+.
+
+/*----------------------------------------------------------------------------*/
+Number<ByRef num as Expression>
+= intliteral						(. num = new Expression with { .Type = ExpressionType.INTEGER_, .IntegerValue = Convert.ToInt32(t.val) } .)
+.
+
+/*----------------------------------------------------------------------------*/
+Expr<ByRef exp as Expression>		(. Dim exp2 as Expression = Nothing
+										Dim op as ExpressionType .)
+	= AndExp<exp>
+	{ OrOp<op> AndExp<exp2>			(. exp = ConcatExpression(exp, op, exp2) .)
+	} .
+
+/*----------------------------------------------------------------------------*/
+AndExp<ByRef exp as Expression>		(. Dim exp2 as Expression = Nothing
+										Dim op as ExpressionType .)
+	= NotExp<exp>
+	{ AndOp<op> NotExp<exp2>		(. exp = ConcatExpression(exp, op, exp2) .)
+	}.
+
+/*----------------------------------------------------------------------------*/
+NotExp<ByRef exp as Expression>		(. Dim exp2 as Expression = Nothing .)
+	= 
+	  CompareExp<exp>
+	| "Not" CompareExp<exp2>		(. exp = ConcatUnaryExpression(ExpressionType.UNARY_OP_NOT, exp2) .)
+	.
+
+/*----------------------------------------------------------------------------*/
+CompareExp<ByRef exp as Expression>	(. Dim exp2 as Expression = Nothing
+										Dim op as ExpressionType .)
+	= ShiftExp<exp>
+	{ CompareOp<op> ShiftExp<exp2>			(. exp = ConcatExpression(exp, op, exp2) .)
+	}.
+
+
+/*----------------------------------------------------------------------------*/
+ShiftExp<ByRef exp as Expression>	(. Dim exp2 as Expression = Nothing
+										Dim op as ExpressionType .)
+	= ConcatExp<exp>
+	{ ShiftOp<op> ConcatExp<exp2>			(. exp = ConcatExpression(exp, op, exp2) .)
+	}.
+
+/*----------------------------------------------------------------------------*/
+ConcatExp<ByRef exp as Expression>	(. Dim exp2 as Expression = Nothing .)
+	= AddExp<exp>
+		{ '&' AddExp<exp2>			(. exp = ConcatExpression(exp, ExpressionType.BINARY_OP_CONCAT, exp2) .)
+		} .
+
+
+/*----------------------------------------------------------------------------*/
+AddExp<ByRef exp as Expression>	(. Dim exp2 as Expression = Nothing
+										Dim op as ExpressionType .)
+	= ModulusExp<exp>
+	{ AddOp<op> ModulusExp<exp2>			(. exp = ConcatExpression(exp, op, exp2) .)
+	}.
+
+
+/*----------------------------------------------------------------------------*/
+ModulusExp<ByRef exp as Expression>	(. Dim exp2 as Expression = Nothing .)
+	= IntDivExp<exp>
+		{ "MOD" IntDivExp<exp2>			(. exp = ConcatExpression(exp, ExpressionType.BINARY_OP_MODULUS, exp2) .)
+		} .
+
+
+/*----------------------------------------------------------------------------*/
+IntDivExp<ByRef exp as Expression>	(. Dim exp2 as Expression = Nothing .)
+	= MultExp<exp>
+		{ '\\' MultExp<exp2>			(. exp = ConcatExpression(exp, ExpressionType.BINARY_OP_INT_DIVIDE, exp2) .)
+		} .
+
+
+/*----------------------------------------------------------------------------*/
+MultExp<ByRef exp as Expression>	(. Dim exp2 as Expression = Nothing
+										Dim op as ExpressionType
+										.)
+	= NegateExp<exp>
+		{ MulOp<op> NegateExp<exp2>	(. exp = ConcatExpression(exp, op, exp2) .)
+		} .
+
+
+/*----------------------------------------------------------------------------*/
+NegateExp<ByRef exp as Expression>	(. Dim exp2 as Expression = Nothing .)
+	= PowerExp<exp>
+	| '-' PowerExp<exp2>				(. exp = ConcatUnaryExpression(ExpressionType.UNARY_OP_MINUS, exp2) .)
+	.
+
+/*----------------------------------------------------------------------------*/
+PowerExp<ByRef exp as Expression>	(. Dim exp2 as Expression = Nothing .)
+	= FieldOrInvokeExp<exp>
+		{ '^' FieldOrInvokeExp<exp2>			(. exp = ConcatExpression(exp, ExpressionType.BINARY_OP_POWER, exp2) .)
+		} .
+
+/*----------------------------------------------------------------------------*/
+FieldOrInvokeExp<ByRef exp as Expression>	(. Dim exp2 As Expression = Nothing .)
+= Value<exp>
+{
+	"("									(. exp = new Expression With { .Type = ExpressionType.FUNCTION_CALL, .ExpressionValue = exp, .Args = new List(Of Expression) } .)
+		[ Expr<exp2>					(. exp.Args.Add(exp2) .)
+		  { "," Expr<exp2>				(. exp.Args.Add(exp2) .)
+		  } ]
+	")"
+ |
+	"." ident							(. exp = new Expression With { .Type = ExpressionType.MEMBER_ACCESS, .ExpressionValue = exp, .StringValue = t.val } .)
+} 
+.
+
+/*----------------------------------------------------------------------------*/
+Value<ByRef exp as Expression>
+	=
+	  Ident<exp>
+	| Number<exp>
+	| string						(. exp = new Expression With { .Type = ExpressionType.STRING_,  .StringValue = t.val.Substring(1, t.val.Length-2) } .)
+	| "(" Expr<exp> ")"
+	| NewExp<exp>
+.
+
+/*----------------------------------------------------------------------------*/
+NewExp<ByRef exp as Expression>		(. Dim exp2 as Expression = Nothing
+									   Dim ival as String = Nothing
+									   Dim te as VariableType = Nothing .)
+	= "New" TypeExpression<te>		(. exp = new Expression With { .Type = ExpressionType.NEW_, .NewType = te, .Args = new List(Of Expression) } .)
+		["("
+			[ Expr<exp2>			(. exp.Args.Add(exp2) .)
+			  { "," Expr<exp2>		(. exp.Args.Add(exp2) .)
+			} ]
+		")" ]
+		[ "With" "{"				(. exp.Initializers = new List(Of KeyValuePair(Of String, Expression)) .)
+			"." SimpleIdent<ival> "=" Expr<exp2>	(. exp.Initializers.Add(new KeyValuePair(Of String, Expression)(ival, exp2)) .)
+			{ 
+			 "," "." SimpleIdent<ival> "=" Expr<exp2>	(. exp.Initializers.Add(new KeyValuePair(Of String, Expression)(ival, exp2)) .)
+			}
+		"}" ]
+.
+
+SimpleIdent<ByRef Name As String>
+= ident									(. Name = t.val .)
+.
+
+/*----------------------------------------------------------------------------*/
+AddOp<ByRef op As ExpressionType> =
+	  '+'	(. op = ExpressionType.BINARY_OP_PLUS .)
+	| '-'	(. op = ExpressionType.BINARY_OP_MINUS .)
+	.
+
+/*----------------------------------------------------------------------------*/
+MulOp<ByRef op As ExpressionType> =
+	  '*'	(. op = ExpressionType.BINARY_OP_MULTIPLY .)
+	| '/'	(. op = ExpressionType.BINARY_OP_DIVIDE .)
+	.
+
+/*----------------------------------------------------------------------------*/
+CompareOp<ByRef op As ExpressionType> =
+	  '='	(. op = ExpressionType.BINARY_OP_EQUALS .)
+	| "<>"	(. op = ExpressionType.BINARY_OP_NOT_EQUALS .)
+	| '<'	(. op = ExpressionType.BINARY_OP_LESSER .)
+	| "<="	(. op = ExpressionType.BINARY_OP_LESSER_OR_EQUAL .)
+	| '>'	(. op = ExpressionType.BINARY_OP_GREATER .)
+	| ">="	(. op = ExpressionType.BINARY_OP_GREATER_OR_EQUAL .)
+	| "Is"		(. op = ExpressionType.BINARY_OP_IS .)
+	| "IsNot"	(. op = ExpressionType.BINARY_OP_ISNOT .)
+//	| "Like"	(. op = ExpressionType.BINARY_OP_LIKE .)
+	.
+
+/*----------------------------------------------------------------------------*/
+ShiftOp<ByRef op As ExpressionType> =
+	  "<<"	(. op = ExpressionType.BINARY_OP_SHIFT_LEFT .)
+	| ">>"	(. op = ExpressionType.BINARY_OP_SHIFT_RIGHT .)
+	.
+
+/*----------------------------------------------------------------------------*/
+AndOp<ByRef op As ExpressionType> =
+	  "And"		(. op = ExpressionType.BINARY_OP_AND .)
+	| "AndAlso"	(. op = ExpressionType.BINARY_OP_ANDALSO .)
+	.
+
+/*----------------------------------------------------------------------------*/
+OrOp<ByRef op As ExpressionType> =
+	  "Or"		(. op = ExpressionType.BINARY_OP_OR .)
+	| "OrElse"	(. op = ExpressionType.BINARY_OP_ORELSE .)
+	| "Xor"		(. op = ExpressionType.BINARY_OP_XOR .)
+	.
+
+newline = newline1 { newline1 } .
+
+END VisualBasicCompiler .
+
