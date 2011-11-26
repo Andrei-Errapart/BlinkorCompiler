@@ -1,1 +1,1 @@
-A basic look-a-like language tailored for microcontrollers and Javascript.
+A compilation system for Blinkor, targeting microcontrollers and JavaScript.
